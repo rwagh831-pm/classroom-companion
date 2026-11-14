@@ -1,0 +1,14 @@
+# Secrets — NEVER upload these to GitHub
+.env
+
+# Python junk files
+__pycache__/
+*.pyc
+
+# The database file (created when the app runs; not source code)
+*.db
+*.sqlite3
+
+# Virtual environments (if we add one later)
+.venv/
+venv/
