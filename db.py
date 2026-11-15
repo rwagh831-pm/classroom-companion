@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS reminders (
+    id             INTEGER PRIMARY KEY,
+    assignment_id  INTEGER NOT NULL REFERENCES assignments(id),
+    student_id     INTEGER NOT NULL REFERENCES users(id),
+    kind           TEXT NOT NULL,
+    sent_at        TEXT NOT NULL,
+    UNIQUE (assignment_id, student_id, kind)
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY,
     type           TEXT NOT NULL,

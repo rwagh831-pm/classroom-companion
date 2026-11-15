@@ -1,8 +1,10 @@
 import os
+import time
 import uuid
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+import reminders
 
 import db
 import brain
@@ -273,6 +275,16 @@ def handle_message(message):
                      buttons=[[{"text": "📊 Open dashboard", "web_app": {"url": url}}]])
         return
 
+    if text.startswith("/remind"):
+        if not teacher_classes(user["id"]):
+            send_message(chat_id, "Only teachers can run reminders.")
+            return
+        summary = reminders.run_reminders(demo=("force" in text))
+        send_message(chat_id, f"Reminder job ran.\nSent to students: {summary['sent']}\nTeacher nudges: {summary['teacher_nudges']}\n"
+                              f"Deferred (quiet hours): {summary['deferred_quiet_hours']}\nSkipped: {summary['skipped']}\n\n"
+                              f"(Use /remind force to ignore quiet hours and silence thresholds for testing.)")
+        return
+
     if text == "/start":
         roles = roles_of(user["id"])
         role_text = ", ".join(f"{r['role']} in {r['class_name']}" for r in roles)
@@ -339,7 +351,18 @@ if __name__ == "__main__":
     print("Bot is running (polling). Press Ctrl+C to stop.")
     offset = None
     while True:
-        updates = get_updates(offset)
+        # Resilience 1: a network blip must not kill the bot. Wait and retry.
+        try:
+            updates = get_updates(offset)
+        except requests.exceptions.RequestException as e:
+            print(f"[NETWORK] getUpdates failed ({type(e).__name__}). Retrying in 5s.")
+            time.sleep(5)
+            continue
         for update in updates:
             offset = update["update_id"] + 1
-            handle_update(update)
+            # Resilience 2: one bad update must not stop service for everyone else.
+            try:
+                handle_update(update)
+            except Exception as e:
+                print(f"[ERROR] update {update['update_id']} failed: {type(e).__name__}: {e}")
+                db.log_event("handler_error", None, None, f"update={update['update_id']} {type(e).__name__}")

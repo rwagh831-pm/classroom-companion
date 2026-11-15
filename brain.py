@@ -154,6 +154,41 @@ def interpret_student_message(student_message, assignment_title):
 # =====================================================================
 # Quick test harness
 # =====================================================================
+
+# =====================================================================
+# PART 3 — REMINDERS: rules choose the kind, the model writes the words
+# =====================================================================
+
+class ReminderText(BaseModel):
+    text: str = Field(min_length=5, max_length=280)
+
+
+REMINDER_PROMPT = """You write one short, warm reminder message for a 13-14 year old student, in simple English.
+Reply with ONLY a JSON object: {"text": "<the message, max 2 sentences, no emojis>"}
+Kinds:
+- not_seen: they have not acknowledged the assignment; ask them to reply "ok" if they have seen it.
+- due_soon: the deadline is within a day; encourage them to send their work.
+- overdue: the deadline has passed; be kind, not scolding; ask them to send it or say what is blocking them.
+Always mention the assignment title and the due date/time you are given. Keep every string on one line."""
+
+FALLBACK_REMINDER = {
+    "not_seen": "Hi {name}, did you see the assignment '{title}'? It is due {due}. Reply 'ok' if you have seen it.",
+    "due_soon": "Hi {name}, '{title}' is due {due}. Please send your work when it is ready.",
+    "overdue":  "Hi {name}, '{title}' was due {due}. Please send it, or tell me what is stopping you.",
+}
+
+
+def write_reminder(kind, student_name, title, due_text):
+    prompt = f"Kind: {kind}\nStudent: {student_name}\nAssignment: {title}\nDue: {due_text}"
+    try:
+        response = client.messages.create(
+            model="claude-haiku-5-5", max_tokens=600, system=REMINDER_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return ReminderText.model_validate_json(get_text(response)).text
+    except Exception:
+        return FALLBACK_REMINDER[kind].format(name=student_name, title=title, due=due_text)
+
 if __name__ == "__main__":
     print("=== TEACHER MESSAGES ===")
     for msg in [
