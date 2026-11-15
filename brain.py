@@ -189,6 +189,62 @@ def write_reminder(kind, student_name, title, due_text):
     except Exception:
         return FALLBACK_REMINDER[kind].format(name=student_name, title=title, due=due_text)
 
+# =====================================================================
+# PART 4 — TEACHER CORRECTIONS: is this a new assignment or a change?
+# =====================================================================
+
+class TeacherIntent(BaseModel):
+    intent: Literal["new_assignment", "change_deadline", "other"]
+    confidence: float = Field(ge=0, le=1)
+    new_due_at: Optional[datetime] = None          # only for change_deadline
+    clarifying_question: Optional[str] = None
+
+
+TEACHER_INTENT_PROMPT = """A teacher sent a message. Decide whether it is a NEW assignment or a CHANGE to the deadline of their latest assignment.
+Reply with ONLY a JSON object, no other text:
+{"intent": "<new_assignment | change_deadline | other>",
+ "confidence": <0.0 to 1.0>,
+ "new_due_at": "<ISO 8601 datetime with timezone offset if intent is change_deadline, else null>",
+ "clarifying_question": "<one short question if the new deadline is unclear, else null>"}
+
+- change_deadline: the teacher refers to existing work and moves its date ("move it to Friday", "extend the deadline", "make it Monday instead", "give them one more day").
+- new_assignment: the teacher describes work to do.
+- other: anything else.
+Context: Indian school, informal Indian English. "day after" = day after tomorrow. If no time of day: evening = 18:00, morning = 08:00, else 20:00.
+Resolve relative dates from the current date/time given. Never invent a date that was not stated. Keep every string on one line. Output valid JSON only."""
+
+
+def classify_teacher_message(teacher_message, latest_title, latest_due_text):
+    now = datetime.now(SCHOOL_TZ)
+    user_prompt = (
+        f"Current date and time: {now.strftime('%A %d %B %Y, %H:%M')} (Asia/Kolkata, IST).\n"
+        f"Teacher's latest open assignment: '{latest_title}', currently due {latest_due_text}.\n\n"
+        f"Teacher's message:\n{teacher_message}"
+    )
+    response = client.messages.create(
+        model="claude-haiku-5-5", max_tokens=1000, system=TEACHER_INTENT_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    raw = get_text(response)
+    try:
+        ti = TeacherIntent.model_validate_json(raw)
+    except ValidationError as e:
+        return {"ok": False, "reason": "model_output_invalid", "detail": str(e), "raw": raw, "intent": "other"}
+
+    if ti.intent != "change_deadline" or ti.confidence < CONFIDENCE_THRESHOLD:
+        return {"ok": True, "intent": ti.intent if ti.confidence >= CONFIDENCE_THRESHOLD else "new_assignment"}
+
+    if ti.new_due_at is None:
+        return {"ok": False, "reason": "needs_clarification", "intent": "change_deadline",
+                "question": ti.clarifying_question or "What should the new deadline be?"}
+    if ti.new_due_at.tzinfo is None:
+        ti.new_due_at = ti.new_due_at.replace(tzinfo=SCHOOL_TZ)
+    if ti.new_due_at <= now:
+        return {"ok": False, "reason": "needs_clarification", "intent": "change_deadline",
+                "question": f"The new deadline I understood ({ti.new_due_at:%a %d %b, %H:%M}) is already in the past. When should it be due?"}
+    return {"ok": True, "intent": "change_deadline", "new_due_at": ti.new_due_at}
+
+
 if __name__ == "__main__":
     print("=== TEACHER MESSAGES ===")
     for msg in [

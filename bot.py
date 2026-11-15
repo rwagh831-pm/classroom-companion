@@ -114,6 +114,22 @@ def set_student_status(assignment_id, student_id, new_status):
         conn.execute("UPDATE assignment_students SET status = ?, updated_at = ? WHERE assignment_id = ? AND student_id = ?",
                      (new_status, now_iso(), assignment_id, student_id))
 
+def latest_open_assignment(teacher_id):
+    with db.connect() as conn:
+        return conn.execute("""
+            SELECT * FROM assignments WHERE created_by = ? AND status != 'cancelled'
+            ORDER BY created_at DESC LIMIT 1
+        """, (teacher_id,)).fetchone()
+
+def change_deadline(assignment_id, new_due_iso):
+    """Rules for a corrected deadline: update it, students who only acknowledged must see the new date again,
+    date-based reminders become valid again (not_seen / blocked_teacher are about the student, so they stay)."""
+    with db.connect() as conn:
+        conn.execute("UPDATE assignments SET due_at = ? WHERE id = ?", (new_due_iso, assignment_id))
+        conn.execute("UPDATE assignment_students SET status = 'assigned', updated_at = ? WHERE assignment_id = ? AND status = 'acknowledged'",
+                     (now_iso(), assignment_id))
+        conn.execute("DELETE FROM reminders WHERE assignment_id = ? AND kind IN ('due_soon', 'overdue')", (assignment_id,))
+
 def add_submission(assignment_id, student_id, kind, content):
     with db.connect() as conn:
         conn.execute("INSERT INTO submissions (assignment_id, student_id, kind, content, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -178,6 +194,24 @@ def handle_teacher(message, user, classes):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
     cls = classes[0]
+
+    # ---- Correction? Only possible if the teacher has an open assignment to correct. ----
+    latest = latest_open_assignment(user["id"])
+    if latest is not None:
+        old_due = datetime.fromisoformat(latest["due_at"])
+        c = brain.classify_teacher_message(text, latest["title"], f"{old_due:%a %d %b, %H:%M}")
+        if c.get("intent") == "change_deadline":
+            if not c["ok"]:
+                send_message(chat_id, f"Quick question: {c['question']}")
+                return
+            draft_id = uuid.uuid4().hex[:8]
+            pending[draft_id] = {"kind": "change", "teacher": user, "assignment": latest, "new_due_at": c["new_due_at"]}
+            buttons = [[{"text": "✅ Confirm change", "callback_data": f"confirm:{draft_id}"},
+                        {"text": "❌ Cancel", "callback_data": f"cancel:{draft_id}"}]]
+            send_message(chat_id, f"📝 Change deadline — {latest['title']}\n\nFrom: {old_due:%a %d %b, %H:%M}\nTo:   {c['new_due_at']:%a %d %b, %H:%M}\n\n"
+                                  f"Students who already acknowledged will be asked to confirm the new date. Apply?", buttons=buttons)
+            return
+
     result = brain.parse_assignment(text, subject=cls["subject"], class_name=cls["class_name"])
 
     if result["ok"]:
@@ -314,6 +348,23 @@ def handle_callback(callback):
         return
     if action == "cancel":
         edit_message(chat_id, message_id, "Cancelled. Nothing was sent.")
+        return
+
+    # ---- Deadline correction ----
+    if item.get("kind") == "change":
+        teacher, a, new_due = item["teacher"], item["assignment"], item["new_due_at"]
+        old_due = datetime.fromisoformat(a["due_at"])
+        change_deadline(a["id"], new_due.isoformat())
+        db.log_event("deadline_changed", actor_id=teacher["id"], assignment_id=a["id"],
+                     detail=f"{old_due:%d %b %H:%M} -> {new_due:%d %b %H:%M}")
+        sent = 0
+        for student in students_in_class(a["class_id"]):
+            if student["telegram_id"] is None:
+                continue
+            send_message(student["telegram_id"],
+                         f"📝 Deadline changed — {a['title']}\n\nNew due: {new_due:%a %d %b, %H:%M} (was {old_due:%a %d %b, %H:%M})\n\nReply 'ok' so your teacher knows you saw the new date.")
+            sent += 1
+        edit_message(chat_id, message_id, f"✅ Deadline changed: {a['title']}\nNow due {new_due:%a %d %b, %H:%M}. Told {sent} student(s).")
         return
 
     teacher, cls, draft = item["teacher"], item["class"], item["draft"]
