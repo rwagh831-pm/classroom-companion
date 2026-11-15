@@ -262,9 +262,15 @@ def handle_message(message):
             return
         reply, linked_user = try_link(telegram_id, text.upper())
         send_message(chat_id, reply)
-        if linked_user is not None:                                  # deliver anything already waiting
+        if linked_user is not None:
             for a in student_assignments(linked_user["id"], open_only=True):
                 send_message(chat_id, format_assignment_for_student(a))
+        return
+
+    if text == "/app":
+        url = os.getenv("MINI_APP_URL")
+        send_message(chat_id, "Open your Classroom Companion dashboard:",
+                     buttons=[[{"text": "📊 Open dashboard", "web_app": {"url": url}}]])
         return
 
     if text == "/start":
