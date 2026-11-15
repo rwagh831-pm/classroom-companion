@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS memberships (
     user_id   INTEGER NOT NULL REFERENCES users(id),
     class_id  INTEGER NOT NULL REFERENCES classes(id),
     role      TEXT NOT NULL CHECK (role IN ('teacher', 'student', 'coordinator')),
+    subject   TEXT,
     UNIQUE (user_id, class_id, role)
 );
 
@@ -58,7 +59,7 @@ def seed():
         conn.execute("INSERT OR IGNORE INTO schools (id, name, timezone) VALUES (1, 'Greenfield Public School', 'Asia/Kolkata')")
         conn.execute("INSERT OR IGNORE INTO classes (id, school_id, name) VALUES (1, 1, '8A'), (2, 1, '8B')")
         conn.execute("INSERT OR IGNORE INTO users (id, display_name) VALUES (1, 'Priya (Maths)'), (2, 'Aarav'), (3, 'Diya')")
-        conn.execute("INSERT OR IGNORE INTO memberships (user_id, class_id, role) VALUES (1, 1, 'teacher'), (2, 1, 'student'), (3, 1, 'student')")
+        conn.execute("INSERT OR IGNORE INTO memberships (user_id, class_id, role, subject) VALUES (1, 1, 'teacher', 'Maths'), (2, 1, 'student', NULL), (3, 1, 'student', NULL)")
         conn.execute("INSERT OR IGNORE INTO invites (code, class_id, role, for_user_id) VALUES ('T-8A-PRIYA', 1, 'teacher', 1), ('S-8A-AARAV', 1, 'student', 2), ('S-8A-DIYA', 1, 'student', 3)")
 
 
