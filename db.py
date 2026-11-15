@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS assignment_students (
     PRIMARY KEY (assignment_id, student_id)
 );
 
+CREATE TABLE IF NOT EXISTS submissions (
+    id             INTEGER PRIMARY KEY,
+    assignment_id  INTEGER NOT NULL REFERENCES assignments(id),
+    student_id     INTEGER NOT NULL REFERENCES users(id),
+    kind           TEXT NOT NULL CHECK (kind IN ('text', 'photo', 'file')),
+    content        TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY,
     type           TEXT NOT NULL,

@@ -1,17 +1,25 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Literal
 
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
 client = anthropic.Anthropic()
 SCHOOL_TZ = ZoneInfo("Asia/Kolkata")
-CONFIDENCE_THRESHOLD = 0.7         # below this -> ask a clarifying question
-NOT_ASSIGNMENT_THRESHOLD = 0.3     # below this -> it is not an assignment at all
+CONFIDENCE_THRESHOLD = 0.7
+NOT_ASSIGNMENT_THRESHOLD = 0.3
+STUDENT_CONFIDENCE_THRESHOLD = 0.6
 
 
-# ---------- THE SCHEMA: what a valid draft must look like ----------
+def get_text(response):
+    return "".join(block.text for block in response.content if block.type == "text")
+
+
+# =====================================================================
+# PART 1 — TEACHER: message -> assignment draft
+# =====================================================================
+
 class AssignmentDraft(BaseModel):
     title: str = Field(min_length=3, max_length=80)
     instructions: str = Field(min_length=3)
@@ -43,12 +51,7 @@ Rules:
 - Keep every string on one line. Output valid JSON only."""
 
 
-def get_text(response):
-    return "".join(block.text for block in response.content if block.type == "text")
-
-
 def parse_assignment(teacher_message, subject=None, class_name=None):
-    # RULE: code supplies the current date/time and the known facts. The model never guesses them.
     now = datetime.now(SCHOOL_TZ)
 
     known = []
@@ -64,7 +67,6 @@ def parse_assignment(teacher_message, subject=None, class_name=None):
         f"Teacher's message:\n{teacher_message}"
     )
 
-    # MODEL: understand the language and propose a draft.
     response = client.messages.create(
         model="claude-haiku-5-5",
         max_tokens=1500,
@@ -73,26 +75,21 @@ def parse_assignment(teacher_message, subject=None, class_name=None):
     )
     raw = get_text(response)
 
-    # RULE 1: must match the schema, else it is a model failure.
     try:
         draft = AssignmentDraft.model_validate_json(raw)
     except ValidationError as e:
         return {"ok": False, "reason": "model_output_invalid", "detail": str(e), "raw": raw}
 
-    # RULE 2: a date without a timezone is school time.
     if draft.due_at is not None and draft.due_at.tzinfo is None:
         draft.due_at = draft.due_at.replace(tzinfo=SCHOOL_TZ)
 
-    # RULE 3: very low confidence -> not an assignment. Do not ask about deadlines.
     if draft.confidence < NOT_ASSIGNMENT_THRESHOLD:
         return {"ok": False, "reason": "not_an_assignment"}
 
-    # RULE 4: unsure or no deadline -> ask, don't create.
     if draft.confidence < CONFIDENCE_THRESHOLD or draft.due_at is None:
         question = draft.clarifying_question or "When is this due?"
         return {"ok": False, "reason": "needs_clarification", "question": question, "draft": draft}
 
-    # RULE 5: a past deadline is never acceptable.
     if draft.due_at <= now:
         return {
             "ok": False,
@@ -104,16 +101,66 @@ def parse_assignment(teacher_message, subject=None, class_name=None):
     return {"ok": True, "draft": draft}
 
 
-# ---------- Quick test harness: messy real messages from Appendix A ----------
+# =====================================================================
+# PART 2 — STUDENT: message -> intent
+# =====================================================================
+
+class StudentUpdate(BaseModel):
+    intent: Literal["acknowledge", "progress", "blocked", "needs_help", "submit_text", "done_cannot_send", "other"]
+    confidence: float = Field(ge=0, le=1)
+    note: str = Field(min_length=1, max_length=200)   # one line for the teacher
+
+
+STUDENT_PROMPT = """You read a student's informal message about a homework assignment and classify the intent.
+Reply with ONLY a JSON object, no other text, in this exact shape:
+{"intent": "<one of: acknowledge | progress | blocked | needs_help | submit_text | done_cannot_send | other>",
+ "confidence": <0.0 to 1.0>,
+ "note": "<one short line a teacher can read, e.g. 'Stuck on question 5 - the formula'>"}
+
+Meaning of each intent:
+- acknowledge: the student has seen/understood the assignment ("ok", "got it", "will do").
+- progress: partly done, working on it ("done half", "doing it now").
+- blocked: cannot continue because something is missing or wrong ("no book", "don't have the sheet", "can't do this").
+- needs_help: asking a question or confused about the content ("stuck on q5", "which page", "not understanding").
+- submit_text: the message ITSELF contains the answer or work.
+- done_cannot_send: claims it is finished but cannot send proof ("did it but phone has no space").
+- other: unrelated chat or unclear.
+
+Students are 13-14, write informal Indian English, may use "mam"/"sir". If unsure between two intents, pick the one most useful for the teacher to know and lower the confidence. Keep every string on one line. Output valid JSON only."""
+
+
+def interpret_student_message(student_message, assignment_title):
+    user_prompt = f"Assignment: {assignment_title}\n\nStudent's message:\n{student_message}"
+
+    response = client.messages.create(
+        model="claude-haiku-5-5",
+        max_tokens=1000,
+        system=STUDENT_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    raw = get_text(response)
+
+    try:
+        update = StudentUpdate.model_validate_json(raw)
+    except ValidationError as e:
+        return {"ok": False, "reason": "model_output_invalid", "detail": str(e), "raw": raw}
+
+    if update.confidence < STUDENT_CONFIDENCE_THRESHOLD or update.intent == "other":
+        return {"ok": False, "reason": "unclear", "update": update}
+
+    return {"ok": True, "update": update}
+
+
+# =====================================================================
+# Quick test harness
+# =====================================================================
 if __name__ == "__main__":
-    tests = [
+    print("=== TEACHER MESSAGES ===")
+    for msg in [
         "Do exercise 4.2 q1 to q8, bring it day after. Those who did the extra sheet last week can skip q8.",
-        "Lab report is due tomorrow evening.",
-        "Change of plan, lab report is due Monday not Friday. Sorry! Ignore what I said earlier about the diagram.",
         "Read chapter 3 and make notes.",
         "which page was it",
-    ]
-    for msg in tests:
+    ]:
         print("\nTEACHER:", msg)
         result = parse_assignment(msg, subject="Maths", class_name="8A")
         if result["ok"]:
@@ -122,6 +169,25 @@ if __name__ == "__main__":
         elif result["reason"] == "needs_clarification":
             print(f"  ASK    -> {result['question']}")
         elif result["reason"] == "not_an_assignment":
-            print("  IGNORE -> that doesn't look like an assignment")
+            print("  IGNORE -> not an assignment")
         else:
-            print("  FAIL   -> model output invalid:", result["detail"][:150])
+            print("  FAIL   ->", result["detail"][:150])
+
+    print("\n=== STUDENT MESSAGES ===")
+    for msg in [
+        "ok got it mam",
+        "done half will finish tonight",
+        "stuck on question 5, not understanding the formula",
+        "mam i did it but my phone has no space cant send photo",
+        "i dont have the textbook, cant do it",
+        "lol",
+    ]:
+        print("\nSTUDENT:", msg)
+        result = interpret_student_message(msg, "Exercise 4.2, Q1-Q8")
+        if result["ok"]:
+            u = result["update"]
+            print(f"  {u.intent.upper():<16} confidence {u.confidence} | note: {u.note}")
+        elif result["reason"] == "unclear":
+            print(f"  UNCLEAR          (model said {result['update'].intent}, {result['update'].confidence})")
+        else:
+            print("  FAIL ->", result["detail"][:150])
