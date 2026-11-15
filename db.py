@@ -68,6 +68,16 @@ CREATE TABLE IF NOT EXISTS submissions (
     created_at     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feedback (
+    id             INTEGER PRIMARY KEY,
+    assignment_id  INTEGER NOT NULL REFERENCES assignments(id),
+    student_id     INTEGER NOT NULL REFERENCES users(id),
+    teacher_id     INTEGER NOT NULL REFERENCES users(id),
+    text           TEXT NOT NULL,
+    decision       TEXT NOT NULL CHECK (decision IN ('approve', 'revise')),
+    created_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY,
     type           TEXT NOT NULL,
