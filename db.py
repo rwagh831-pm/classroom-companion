@@ -1,8 +1,8 @@
 import sqlite3
+from datetime import datetime
 
 DB_FILE = "classroom.db"
 
-# The blueprint for our filing cabinet: five drawers (tables).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schools (
     id        INTEGER PRIMARY KEY,
@@ -38,13 +38,42 @@ CREATE TABLE IF NOT EXISTS invites (
     for_user_id           INTEGER REFERENCES users(id),
     used_by_telegram_id   INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS assignments (
+    id            INTEGER PRIMARY KEY,
+    class_id      INTEGER NOT NULL REFERENCES classes(id),
+    created_by    INTEGER NOT NULL REFERENCES users(id),
+    subject       TEXT,
+    title         TEXT NOT NULL,
+    instructions  TEXT NOT NULL,
+    due_at        TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'assigned',
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assignment_students (
+    assignment_id  INTEGER NOT NULL REFERENCES assignments(id),
+    student_id     INTEGER NOT NULL REFERENCES users(id),
+    status         TEXT NOT NULL DEFAULT 'assigned',
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (assignment_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id             INTEGER PRIMARY KEY,
+    type           TEXT NOT NULL,
+    actor_id       INTEGER,
+    assignment_id  INTEGER,
+    detail         TEXT,
+    created_at     TEXT NOT NULL
+);
 """
 
 
 def connect():
     conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row            # lets us read columns by name: row["name"]
-    conn.execute("PRAGMA foreign_keys = ON")  # make SQLite enforce the arrows between tables
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -54,7 +83,6 @@ def init_db():
 
 
 def seed():
-    # The pilot from Appendix A. "OR IGNORE" = skip if already there, so re-running is safe.
     with connect() as conn:
         conn.execute("INSERT OR IGNORE INTO schools (id, name, timezone) VALUES (1, 'Greenfield Public School', 'Asia/Kolkata')")
         conn.execute("INSERT OR IGNORE INTO classes (id, school_id, name) VALUES (1, 1, '8A'), (2, 1, '8B')")
@@ -63,18 +91,28 @@ def seed():
         conn.execute("INSERT OR IGNORE INTO invites (code, class_id, role, for_user_id) VALUES ('T-8A-PRIYA', 1, 'teacher', 1), ('S-8A-AARAV', 1, 'student', 2), ('S-8A-DIYA', 1, 'student', 3)")
 
 
-# This block runs ONLY when you run "python db.py" directly,
-# not when another file does "import db" later.
+def log_event(event_type, actor_id=None, assignment_id=None, detail=None):
+    """Write one line to the events table AND print it - our observable log."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO events (type, actor_id, assignment_id, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_type, actor_id, assignment_id, detail, now),
+        )
+    print(f"[EVENT {now}] {event_type} actor={actor_id} assignment={assignment_id} {detail or ''}")
+
+
 if __name__ == "__main__":
     init_db()
     seed()
     with connect() as conn:
         rows = conn.execute("""
-            SELECT users.display_name, memberships.role, classes.name AS class_name
+            SELECT users.display_name, memberships.role, memberships.subject, classes.name AS class_name
             FROM memberships
             JOIN users   ON users.id   = memberships.user_id
             JOIN classes ON classes.id = memberships.class_id
         """).fetchall()
     for row in rows:
-        print(row["display_name"], "is a", row["role"], "in", row["class_name"])
+        subject = f" ({row['subject']})" if row["subject"] else ""
+        print(row["display_name"], "is a", row["role"] + subject, "in", row["class_name"])
     print("\nDatabase ready:", DB_FILE)
