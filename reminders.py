@@ -33,19 +33,27 @@ def decide(status, due_at, created_at, now, demo=False):
 
 # ---------- THE JOB ----------
 
-def run_reminders(demo=False):
+def run_reminders(demo=False, assignment_id=None):
+    """demo=True ignores quiet hours and the silence threshold. assignment_id limits the run to one assignment
+    (used by the teacher's 'Remind now' button in the Mini App)."""
     now = datetime.now(brain.SCHOOL_TZ)
     quiet = is_quiet_hours(now) and not demo
     summary = {"sent": 0, "teacher_nudges": 0, "deferred_quiet_hours": 0, "skipped": 0}
 
+    sql = """
+        SELECT a.id AS assignment_id, a.title, a.due_at, a.created_at, a.created_by,
+               u.id AS student_id, u.display_name, u.telegram_id, s.status
+        FROM assignment_students s
+        JOIN assignments a ON a.id = s.assignment_id
+        JOIN users u ON u.id = s.student_id
+        WHERE a.status != 'cancelled'
+    """
+    params = ()
+    if assignment_id is not None:
+        sql += " AND a.id = ?"
+        params = (assignment_id,)
     with db.connect() as conn:
-        rows = conn.execute("""
-            SELECT a.id AS assignment_id, a.title, a.due_at, a.created_at, a.created_by,
-                   u.id AS student_id, u.display_name, u.telegram_id, s.status
-            FROM assignment_students s
-            JOIN assignments a ON a.id = s.assignment_id
-            JOIN users u ON u.id = s.student_id
-        """).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
     for r in rows:
         due_at = datetime.fromisoformat(r["due_at"])

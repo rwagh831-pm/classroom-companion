@@ -76,7 +76,9 @@ python db.py                  # creates classroom.db with the pilot seed
 python tests.py               # 14 tests, ~0.2 s
 ```
 
-Run three terminals:
+**One click:** double-click `start.bat` (or `python start.py`). It creates/updates the database, starts the Mini App server and the bot in their own windows, opens a cloudflared tunnel, and writes the tunnel URL into `.env` as `MINI_APP_URL` automatically. Close the launcher window to stop everything. **Restart path:** close it, run it again — all state is in `classroom.db`.
+
+Manually, the same three processes:
 
 ```bash
 python bot.py
@@ -88,7 +90,7 @@ python -m uvicorn app:app --port 8000 --reload
 cloudflared tunnel --url http://localhost:8000
 ```
 
-Copy the `https://….trycloudflare.com` URL that cloudflared prints into `.env` as `MINI_APP_URL`, restart `bot.py`. The URL changes every time cloudflared restarts (quick tunnels are anonymous and unnamed) — a named tunnel or a real host fixes this in production.
+(then copy the `https://….trycloudflare.com` URL into `.env` as `MINI_APP_URL` and restart `bot.py`). The URL changes every time cloudflared restarts (quick tunnels are anonymous) — a named tunnel or a real host fixes this in production.
 
 **Reset to a clean pilot:** stop `bot.py`, delete `classroom.db`, `python db.py`. If `SEED_TEACHER_TELEGRAM_ID` is set, the teacher stays linked. (Production would use migrations, not a reset.)
 
@@ -100,7 +102,7 @@ Copy the `https://….trycloudflare.com` URL that cloudflared prints into `.env`
 | Aarav | student, 8A | `S-8A-AARAV` | send the code to the bot |
 | Diya | student, 8A | `S-8A-DIYA` | intentionally **left unlinked** in the demo |
 
-Bot commands: `/start` · `/app` (opens the Mini App) · `/remind` (teacher only; `/remind force` ignores quiet hours and silence thresholds for demos). Everything else is plain language.
+**Nobody needs to know a command.** An unknown person is asked for their invite code; after linking, persistent buttons appear under the typing box (📊 Dashboard · 📝 Summary · ⏰ Run reminders · ❓ Help for teachers; 📊 Dashboard · ❓ Help for students), every assignment message carries ✅ Got it / 🙋 I need help buttons, and the `/` menu is registered with Telegram. Commands still work for the curious: `/start` · `/app` · `/summary` · `/remind` (`/remind force` ignores quiet hours and silence thresholds for demos) · `/help`. Everything else is plain language — including questions like *"who is at risk this week?"*.
 
 ---
 
@@ -149,7 +151,7 @@ assigned ──► acknowledged ──► in_progress ──► submitted ──
 - **Rules decide who and which kind** (`reminders.decide`, pure function, tested). **The model only writes the sentence**, with a plain template fallback if it fails.
 - **Quiet hours 21:00–07:00 IST**: code defers, logs `reminder_deferred`. The model never sees the clock.
 - **Idempotent**: `reminders(assignment_id, student_id, kind)` is UNIQUE — rerunning the job sends nothing twice. State is in SQLite, so a restart loses nothing.
-- Trigger: `/remind` in chat (manual, as the brief requires) or `python reminders.py loop` (every 10 min). Changing the deadline clears `due_soon`/`overdue` rows so they can fire again for the new date.
+- Triggers: `/remind` (or the ⏰ button) in chat — manual, as the brief requires; **⏰ Remind now** on any assignment in the Mini App (teacher acts from where she sees the state; runs the same rules for that one assignment, ignores quiet hours because it is an explicit human action); `python reminders.py loop` for the scheduled job (every 10 min). Changing the deadline clears `due_soon`/`overdue` rows so they can fire again for the new date.
 
 ### 4.5 LLM boundary — what the model decides vs what code decides
 
@@ -159,6 +161,7 @@ assigned ──► acknowledged ──► in_progress ──► submitted ──
 | "move it to Friday evening" → this is a *change*, new datetime | which assignment (latest open), what to reset, who to notify |
 | "no book, cant do" → intent `blocked`, one-line note | which status that maps to, whether the move is allowed, whether to ping the teacher |
 | the wording of a reminder | whether a reminder is due at all, to whom, quiet hours, duplicates |
+| the morning briefing (`/summary`, "who is at risk this week?") — written from fact lines | every flag in those fact lines: overdue, blocked, silent, submitted, not linked are computed by code; the model may not invent a student or a reason; if it fails, the plain fact list is sent |
 
 Every model call returns JSON validated by a Pydantic schema with a **confidence** field. Three outcomes only: **CREATE / ASK / FAIL**. Below threshold or missing deadline → the bot **asks one clarifying question and never guesses**. Schema failure → logged as `model_failure`, user gets a plain "please rephrase". A photo or file is a submission **with no model call at all**.
 
@@ -199,14 +202,22 @@ Three groups, 14 cases, no network or key needed, throw-away DB:
 2. **Attention Board + state rules** — ranking, "did not see it" vs "did not do it", no backwards moves after submission.
 3. **Trust boundaries** — forged `initData` rejected and signed accepted; invite code cannot be reused or guessed; duplicate update ignored; a deadline change resets exactly the right rows.
 
-The language flows are covered by the manual scenario below and the test harness in `brain.py` (`python brain.py` runs 9 messy messages through the parsers and prints CREATE/ASK/IGNORE and intents).
+**Chat-flow test (end to end, no phone):**
+
+```bash
+python flow_test.py
+```
+
+Feeds 30 fake Telegram updates straight into `handle_update` — the whole scenario plus attack cases (stranger before linking, reused invite code, malformed button data, a non-author tapping Confirm, double taps, replayed `update_id`, acknowledging after submission, deadline in the past) — and checks each reply. It exercises the real model, so it needs `ANTHROPIC_API_KEY`; this is also the NL-interpretation eval. Writing it found four real bugs before the demo: a non-author's tap consumed the teacher's preview (author check now runs before the pop), malformed callback data raised, a teacher's sticker triggered a model call on empty text, and an unreachable model API crashed the handler instead of logging `model_failure` and telling the user to retry.
+
+`python brain.py` additionally runs 9 messy messages from the pilot pack through the parsers and prints CREATE/ASK/IGNORE and intents.
 
 ### Manual live scenario (the brief's section 9)
 
 1. Reset the DB. Priya is linked; Aarav links with `S-8A-AARAV`; Diya stays unlinked.
 2. Priya: *"Do exercise 4.2 q1 to q8, bring it day after"* → preview → Confirm. Aarav receives it; Diya shows as "not linked" on the board. Then *"move it to Friday evening"* → change preview → Confirm → Aarav notified, `deadline_changed` logged.
 3. Aarav: *"done half"* → in progress; *"i dont have the book"* → blocked, teacher pinged. (Second student stays silent.)
-4. Priya: `/remind force` → teacher nudge for the blocked student, "did you see it?" for the silent one; run again → everything skipped.
+4. Priya: `/remind force` → teacher nudge for the blocked student, "did you see it?" for the silent one; run again → everything skipped. Priya: *"who is at risk this week?"* → a model-written briefing from code-computed facts (`summary_sent`).
 5. Aarav sends a photo → `submission_received`; Priya opens `/app`, writes feedback, Approve → Aarav gets a Telegram message; board shows Done.
 6. Open the Mini App URL in Chrome → "Access denied". Send `S-8A-AARAV` again from another phone → "already used".
 
@@ -225,13 +236,23 @@ Places I overrode or redirected the AI:
 
 ---
 
-## 7. Known limitations (honest list)
+## 7. Known limitations and deliberate cuts (honest list)
 
+Cut from the brief's list, with the production version we would build:
+- **Creating a class context in-product** (Cap. 1): the school, classes, memberships and invite codes are seeded by `db.py` (the brief allows "seed data or a setup command"). Production: a coordinator flow that creates a class and mints invite codes — the `invites` table already supports it.
+- **Targeting one student or a group**: assignments go to the whole class. The data is already per-student (`assignment_students`), so targeting is a picker on the preview, not a model change.
+- **Correcting instructions / cancelling**: only deadline changes are built. Same preview-confirm pattern; `cancelled` exists in the schema.
+- **Two teachers sharing a class, a student moving 8A→8B**: supported by the membership model (one row per person-class-role), not demonstrated.
+- **Coordinator view (Meera)**: not built; a `coordinator` membership at school scope plus a read-only board across classes is a week-4 item.
+
+Product ideas from the build, designed but deferred (see PRD plan): voice-note assignment creation (speech-to-text in front of the same parser), per-student timeline (the `events` table already has it), fairness guardrails for "blocked" (reason required; repeat-blocker pattern on the board; per-student extensions), holidays/leave pausing reminders, Mini App filters, scoring/scorecards (a non-goal for the pilot — the pain is visibility, not marks).
+
+Technical limitations:
 - **Pilot simplifications**: a teacher's first class is used; a student's message applies to their latest open assignment; corrections apply to the teacher's latest assignment. A production version needs "which assignment?" disambiguation (reply-to or a picker).
 - **Preview state is in memory** (`pending` dict). A bot restart between preview and Confirm expires the preview. Production: persist drafts in SQLite.
 - **Quick tunnel URL changes** every restart; `MINI_APP_URL` must be updated and the bot restarted.
 - **Polling, single process.** Fine for one school; at 100 schools: webhook + a queue + Postgres, with the idempotency table doing the retry safety.
 - **Model cost**: every teacher message with an open assignment makes two model calls (classify, then parse). A keyword pre-filter would cut the first.
 - **Coordinator view (Meera)** is not built; the access model supports it (a `coordinator` membership at school scope) — week-4 item in the PRD.
-- **Voice notes and the "who is at risk this week?" query** are not built (bonus items); the Attention Board already computes the data the query would summarise.
+- **Voice notes** are not built (bonus item). The "who is at risk this week?" query is built (`/summary` or ask in plain words).
 - No rate limiting on the Mini App API; no migrations (reset only).

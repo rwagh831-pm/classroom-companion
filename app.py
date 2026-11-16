@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 import db
+import reminders
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -156,7 +157,7 @@ def teacher_dashboard(x_init_data: str = Header(default="")):
         }
         if level >= 1:
             attention.append(item)
-        a = assignments.setdefault(r["assignment_id"], {"title": r["title"], "subject": r["subject"], "due": fmt(r["due_at"]), "students": []})
+        a = assignments.setdefault(r["assignment_id"], {"id": r["assignment_id"], "title": r["title"], "subject": r["subject"], "due": fmt(r["due_at"]), "students": []})
         a["students"].append({"name": r["display_name"], "status": r["status"], "level": level})
 
     attention.sort(key=lambda x: -x["level"])
@@ -199,6 +200,23 @@ def send_feedback(body: FeedbackIn, x_init_data: str = Header(default="")):
         headline = "✅ Approved" if body.decision == "approve" else "✏️ Needs changes"
         send_telegram(student["telegram_id"], f"{headline} — {a['title']}\n\nFeedback from {teacher['display_name']}:\n{body.text}")
     return {"ok": True, "new_status": new_status}
+
+
+class RemindIn(BaseModel):
+    assignment_id: int
+
+@app.post("/api/remind")
+def remind_now(body: RemindIn, x_init_data: str = Header(default="")):
+    """Teacher acts from where she sees the state: run the reminder job for ONE assignment, now.
+    Same rules as the scheduled job (blocked -> teacher, silent -> student, idempotent); quiet hours are ignored
+    because this is an explicit teacher action, not an automatic one."""
+    teacher = current_user(x_init_data)
+    with db.connect() as conn:
+        a = conn.execute("SELECT * FROM assignments WHERE id = ?", (body.assignment_id,)).fetchone()
+        if a is None or a["class_id"] not in teacher_class_ids(conn, teacher["id"]):
+            raise HTTPException(status_code=403, detail="You do not teach this class.")
+    summary = reminders.run_reminders(demo=True, assignment_id=body.assignment_id)
+    return {"ok": True, **summary}
 
 
 # ============ API: student dashboard ============
@@ -264,6 +282,14 @@ PAGE = """<!doctype html>
       return data;
     }
 
+    async function remindNow(aid) {
+      try {
+        const r = await api('/api/remind', { assignment_id: aid });
+        alert(`Reminders run.\nTo students: ${r.sent}\nTo you (blocked): ${r.teacher_nudges}\nAlready reminded / nothing due: ${r.skipped}`);
+        load();
+      } catch (e) { alert('Could not run: ' + e.message); }
+    }
+
     async function giveFeedback(aid, sid, decision, key) {
       const text = document.getElementById('fb-' + key).value.trim();
       if (!text) { alert('Write a line of feedback first.'); return; }
@@ -290,7 +316,8 @@ PAGE = """<!doctype html>
       h += `<h3>Assignments</h3>`;
       for (const a of d.assignments) {
         h += `<div class="card"><div class="row"><b>${esc(a.title)}</b><span class="muted">due ${esc(a.due)}</span></div>
-              <div>${a.students.map(s => `<span class="pill">${esc(s.name)}: ${esc(s.status)}</span>`).join('')}</div></div>`;
+              <div>${a.students.map(s => `<span class="pill">${esc(s.name)}: ${esc(s.status)}</span>`).join('')}</div>
+              <button class="rev" onclick="remindNow(${a.id})">⏰ Remind now</button></div>`;
       }
       h += `<h3>Recent activity</h3>`;
       for (const e of d.recent) {

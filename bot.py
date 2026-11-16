@@ -20,11 +20,23 @@ def get_updates(offset):
     response = requests.get(f"{BASE_URL}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35)
     return response.json()["result"]
 
-def send_message(chat_id, text, buttons=None):
+def send_message(chat_id, text, buttons=None, keyboard=None):
+    """buttons = inline buttons under this message. keyboard = persistent buttons under the typing box."""
     payload = {"chat_id": chat_id, "text": text}
     if buttons:
         payload["reply_markup"] = {"inline_keyboard": buttons}
+    elif keyboard:
+        payload["reply_markup"] = {"keyboard": keyboard, "resize_keyboard": True, "is_persistent": True}
     requests.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
+
+def set_bot_commands():
+    """Registers the '/' menu in Telegram so nobody has to remember commands."""
+    commands = [{"command": "start", "description": "Start / see my assignments"},
+                {"command": "app", "description": "Open the dashboard"},
+                {"command": "summary", "description": "Teacher: who needs attention today"},
+                {"command": "remind", "description": "Teacher: run reminders now"},
+                {"command": "help", "description": "What can I type here?"}]
+    requests.post(f"{BASE_URL}/setMyCommands", json={"commands": commands}, timeout=10)
 
 def edit_message(chat_id, message_id, text):
     requests.post(f"{BASE_URL}/editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text}, timeout=10)
@@ -150,12 +162,101 @@ def format_assignment_for_student(a):
     due = datetime.fromisoformat(a["due_at"])
     return f"📚 {a['subject']} — {a['title']}\n{a['instructions']}\n\nDue: {due:%a %d %b, %H:%M}\nStatus: {a['my_status']}"
 
+def assignment_buttons(assignment_id):
+    """One tap to acknowledge or ask for help - no typing needed."""
+    return [[{"text": "✅ Got it", "callback_data": f"ack:{assignment_id}"},
+             {"text": "🙋 I need help", "callback_data": f"help:{assignment_id}"}]]
+
+def dashboard_url():
+    return os.getenv("MINI_APP_URL")
+
+def keyboard_for(user):
+    """Persistent buttons under the typing box, by role. Dashboard sends the inline 'Open dashboard' link:
+    keyboard-launched Mini Apps arrived with initData our server could not verify, inline-launched ones verify fine."""
+    dash = {"text": "📊 Dashboard"}
+    if teacher_classes(user["id"]):
+        return [[dash, {"text": "📝 Summary"}], [{"text": "⏰ Run reminders"}, {"text": "❓ Help"}]]
+    return [[dash, {"text": "❓ Help"}]]
+
+BUTTON_TO_COMMAND = {"📝 Summary": "/summary", "⏰ Run reminders": "/remind", "❓ Help": "/help", "📊 Dashboard": "/app"}
+
+TEACHER_HELP = ("Just type what you want, like you would in a WhatsApp group:\n"
+                "• To assign work: 'Do exercise 4.2 q1 to q8, bring it day after'\n"
+                "• To change a deadline: 'move it to Friday evening'\n"
+                "• To ask: 'who is at risk this week?'\n"
+                "• 📝 Summary = who needs you today   • ⏰ Run reminders = nudge now   • 📊 Dashboard = full view")
+STUDENT_HELP = ("Reply to your assignment in your own words, e.g. 'ok', 'done half', 'stuck on q5', 'no book'.\n"
+                "Send a photo of your work to submit it. Tap 📊 Dashboard to see all your assignments and feedback.")
+
 def notify_teacher(assignment_id, text):
     with db.connect() as conn:
         a = conn.execute("SELECT created_by FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
     teacher = find_user_by_id(a["created_by"])
     if teacher["telegram_id"] is not None:
         send_message(teacher["telegram_id"], text)
+
+
+# ============ TEACHER SUMMARY: code computes facts, model writes the briefing ============
+
+RISK_WORDS = ("at risk", "who needs", "who is behind", "who hasn't", "who has not", "summary", "how is the class", "who should i")
+
+def is_risk_question(text):
+    t = text.lower()
+    return t.endswith("?") and any(w in t for w in RISK_WORDS)
+
+def teacher_facts(teacher_id):
+    """Plain-English fact lines, one per student-assignment, with flags decided by CODE (never by the model)."""
+    now = datetime.now(brain.SCHOOL_TZ)
+    class_ids = [c["class_id"] for c in teacher_classes(teacher_id)]
+    if not class_ids:
+        return []
+    marks = ",".join("?" * len(class_ids))
+    with db.connect() as conn:
+        rows = conn.execute(f"""
+            SELECT a.title, a.due_at, s.status, s.updated_at, u.display_name, u.telegram_id
+            FROM assignment_students s JOIN assignments a ON a.id = s.assignment_id JOIN users u ON u.id = s.student_id
+            WHERE a.class_id IN ({marks}) AND a.status != 'cancelled' ORDER BY a.created_at DESC, u.display_name
+        """, class_ids).fetchall()
+        events = conn.execute(f"""
+            SELECT e.type, e.detail, e.created_at, u.display_name, a.title
+            FROM events e LEFT JOIN users u ON u.id = e.actor_id LEFT JOIN assignments a ON a.id = e.assignment_id
+            WHERE a.class_id IN ({marks}) AND e.type IN ('status_changed','student_update','submission_received','feedback_sent','deadline_changed')
+            ORDER BY e.id DESC LIMIT 12
+        """, class_ids).fetchall()
+    lines = []
+    for r in rows:
+        due = datetime.fromisoformat(r["due_at"])
+        flags = []
+        if r["telegram_id"] is None:
+            flags.append("NOT LINKED - cannot see assignments")
+        if r["status"] in ("completed", "cancelled"):
+            flags.append("done")
+        elif r["status"] == "submitted":
+            flags.append("SUBMITTED - waiting for teacher review")
+        elif r["status"] == "blocked":
+            flags.append("BLOCKED - needs teacher")
+        elif now > due:
+            flags.append("OVERDUE" + (" and never acknowledged (did not see it?)" if r["status"] == "assigned" else ""))
+        elif r["status"] == "assigned":
+            flags.append("SILENT - has not acknowledged")
+        else:
+            flags.append("on track")
+        lines.append(f"{r['display_name']} | '{r['title']}' due {due:%a %d %b %H:%M} | status {r['status']} | {'; '.join(flags)}")
+    for e in events:
+        lines.append(f"event {e['created_at'][5:16]} {e['type']} {e['display_name'] or ''} '{e['title'] or ''}': {e['detail'] or ''}")
+    return lines
+
+def summarise_for_teacher(user, question=None):
+    facts = teacher_facts(user["id"])
+    if not facts:
+        return "No assignments yet. Assign something first, e.g. 'Do exercise 4.2 q1 to q8, bring it day after'."
+    result = brain.write_summary(facts, question)
+    if result["ok"]:
+        db.log_event("summary_sent", actor_id=user["id"], detail=(question or "/summary")[:80])
+        return "📝 " + result["text"]
+    db.log_event("model_failure", actor_id=user["id"], detail="summary: " + result["detail"][:150])
+    # Fallback: the facts themselves, no model needed.
+    return "📝 (plain list - the writing model was unavailable)\n" + "\n".join(l for l in facts if not l.startswith("event "))
 
 
 # ============ STUDENT RULES: intent -> status ============
@@ -190,16 +291,34 @@ def can_move(current, new):
 
 # ============ BUSINESS LOGIC ============
 
+def safe_brain(fn, *args, **kwargs):
+    """The model API can be down, slow or mis-configured. That must never crash a handler."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        return {"ok": False, "reason": "model_unavailable", "detail": f"{type(e).__name__}: {str(e)[:150]}", "intent": "other"}
+
+MODEL_DOWN_REPLY = "Sorry, the language service is not responding right now. Please try again in a minute."
+
+
 def handle_teacher(message, user, classes):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
     cls = classes[0]
 
+    if not text:                                           # sticker, photo, voice note: nothing to parse
+        send_message(chat_id, "I can only read text for now.\n\n" + TEACHER_HELP)
+        return
+
     # ---- Correction? Only possible if the teacher has an open assignment to correct. ----
     latest = latest_open_assignment(user["id"])
     if latest is not None:
         old_due = datetime.fromisoformat(latest["due_at"])
-        c = brain.classify_teacher_message(text, latest["title"], f"{old_due:%a %d %b, %H:%M}")
+        c = safe_brain(brain.classify_teacher_message, text, latest["title"], f"{old_due:%a %d %b, %H:%M}")
+        if c.get("reason") == "model_unavailable":
+            db.log_event("model_failure", actor_id=user["id"], detail=c["detail"])
+            send_message(chat_id, MODEL_DOWN_REPLY)
+            return
         if c.get("intent") == "change_deadline":
             if not c["ok"]:
                 send_message(chat_id, f"Quick question: {c['question']}")
@@ -212,7 +331,12 @@ def handle_teacher(message, user, classes):
                                   f"Students who already acknowledged will be asked to confirm the new date. Apply?", buttons=buttons)
             return
 
-    result = brain.parse_assignment(text, subject=cls["subject"], class_name=cls["class_name"])
+    result = safe_brain(brain.parse_assignment, text, subject=cls["subject"], class_name=cls["class_name"])
+
+    if result.get("reason") == "model_unavailable":
+        db.log_event("model_failure", actor_id=user["id"], detail=result["detail"])
+        send_message(chat_id, MODEL_DOWN_REPLY)
+        return
 
     if result["ok"]:
         draft_id = uuid.uuid4().hex[:8]
@@ -257,10 +381,10 @@ def handle_student(message, user):
         return
 
     # ---- Text: the model reads the intent, rules decide the effect ----
-    result = brain.interpret_student_message(text, a["title"])
+    result = safe_brain(brain.interpret_student_message, text, a["title"])
 
     if not result["ok"]:
-        if result["reason"] == "model_output_invalid":
+        if result["reason"] in ("model_output_invalid", "model_unavailable"):
             db.log_event("model_failure", actor_id=user["id"], assignment_id=assignment_id, detail=result["detail"][:200])
         send_message(chat_id, f"Sorry, I didn't catch that. About '{a['title']}', are you: done, stuck, or still working? Or send a photo of your work.")
         return
@@ -292,21 +416,36 @@ def handle_message(message):
 
     user = find_user(telegram_id)
 
+    # ---- Unknown person: the only thing they can do is link with an invite code. Ask for it, don't wait. ----
     if user is None:
-        if text == "/start":
-            send_message(chat_id, "Welcome to Classroom Companion! Please send your invite code (for example S-8A-AARAV).")
+        if text.startswith("/") or not text:
+            send_message(chat_id, "👋 Welcome to Classroom Companion, Greenfield Public School.\n\n"
+                                  "Your teacher or school gave you an invite code (it looks like S-8A-NAME). "
+                                  "Please type it here to get started.")
             return
         reply, linked_user = try_link(telegram_id, text.upper())
-        send_message(chat_id, reply)
-        if linked_user is not None:
-            for a in student_assignments(linked_user["id"], open_only=True):
-                send_message(chat_id, format_assignment_for_student(a))
+        if linked_user is None:
+            send_message(chat_id, reply + "\n\nPlease type your invite code (it looks like S-8A-NAME).")
+            return
+        send_message(chat_id, reply + "\n\nYou can type in your own words here, or use the buttons below.", keyboard=keyboard_for(linked_user))
+        for a in student_assignments(linked_user["id"], open_only=True):
+            send_message(chat_id, format_assignment_for_student(a), buttons=assignment_buttons(a["id"]))
+        return
+
+    text = BUTTON_TO_COMMAND.get(text, text)        # persistent buttons arrive as plain text
+
+    if text == "/help":
+        send_message(chat_id, TEACHER_HELP if teacher_classes(user["id"]) else STUDENT_HELP, keyboard=keyboard_for(user))
         return
 
     if text == "/app":
-        url = os.getenv("MINI_APP_URL")
         send_message(chat_id, "Open your Classroom Companion dashboard:",
-                     buttons=[[{"text": "📊 Open dashboard", "web_app": {"url": url}}]])
+                     buttons=[[{"text": "📊 Open dashboard", "web_app": {"url": dashboard_url()}}]])
+        return
+
+    if text == "/summary" or (teacher_classes(user["id"]) and is_risk_question(text)):
+        question = None if text == "/summary" else text
+        send_message(chat_id, summarise_for_teacher(user, question))
         return
 
     if text.startswith("/remind"):
@@ -322,9 +461,10 @@ def handle_message(message):
     if text == "/start":
         roles = roles_of(user["id"])
         role_text = ", ".join(f"{r['role']} in {r['class_name']}" for r in roles)
-        send_message(chat_id, f"Hello {user['display_name']}! You are: {role_text}.")
-        for a in student_assignments(user["id"]):
-            send_message(chat_id, format_assignment_for_student(a))
+        send_message(chat_id, f"Hello {user['display_name']}! You are: {role_text}.\n\n"
+                              + (TEACHER_HELP if teacher_classes(user["id"]) else STUDENT_HELP), keyboard=keyboard_for(user))
+        for a in student_assignments(user["id"], open_only=True):
+            send_message(chat_id, format_assignment_for_student(a), buttons=assignment_buttons(a["id"]))
         return
 
     classes = teacher_classes(user["id"])
@@ -338,14 +478,41 @@ def handle_callback(callback):
     answer_callback(callback["id"])
     chat_id = callback["message"]["chat"]["id"]
     message_id = callback["message"]["message_id"]
-    action, draft_id = callback["data"].split(":")
+    action, _, draft_id = callback.get("data", "").partition(":")
+    if not draft_id:                                      # malformed / foreign button data: ignore safely
+        return
 
-    item = pending.pop(draft_id, None)
+    # ---- Student one-tap buttons on an assignment message ----
+    if action in ("ack", "help"):
+        user = find_user(callback["from"]["id"])
+        if user is None or not draft_id.isdigit():
+            return
+        assignment_id = int(draft_id)
+        with db.connect() as conn:
+            row = conn.execute("SELECT s.status, a.title FROM assignment_students s JOIN assignments a ON a.id = s.assignment_id "
+                               "WHERE s.assignment_id = ? AND s.student_id = ?", (assignment_id, user["id"])).fetchone()
+        if row is None:                                   # not their assignment -> wrong-context tap, ignore safely
+            send_message(chat_id, "That assignment is not yours.")
+            return
+        if action == "ack":
+            if can_move(row["status"], "acknowledged"):
+                set_student_status(assignment_id, user["id"], "acknowledged")
+                db.log_event("status_changed", actor_id=user["id"], assignment_id=assignment_id, detail=f"{row['status']} -> acknowledged (button)")
+                send_message(chat_id, f"👍 Noted — marked '{row['title']}' as seen.")
+            else:
+                send_message(chat_id, f"Already noted — '{row['title']}' is {row['status'].replace('_', ' ')}.")
+        else:
+            db.log_event("student_update", actor_id=user["id"], assignment_id=assignment_id, detail="tapped: I need help")
+            send_message(chat_id, f"Sure — tell me in your own words what you are stuck on in '{row['title']}', and I'll pass it to your teacher.")
+        return
+
+    item = pending.get(draft_id)
     if item is None:
         edit_message(chat_id, message_id, "This preview has expired. Please send the assignment again.")
         return
     if callback["from"]["id"] != item["teacher"]["telegram_id"]:
-        return
+        return                                            # not the author: ignore WITHOUT consuming the preview
+    pending.pop(draft_id)                                 # only the author's tap consumes it (double tap -> expired)
     if action == "cancel":
         edit_message(chat_id, message_id, "Cancelled. Nothing was sent.")
         return
@@ -378,7 +545,8 @@ def handle_callback(callback):
             not_linked += 1
             continue
         send_message(student["telegram_id"],
-                     f"📚 New {cls['subject']} assignment from {teacher['display_name']}\n\n{draft.title}\n{draft.instructions}\n\nDue: {draft.due_at:%a %d %b, %H:%M}")
+                     f"📚 New {cls['subject']} assignment from {teacher['display_name']}\n\n{draft.title}\n{draft.instructions}\n\nDue: {draft.due_at:%a %d %b, %H:%M}",
+                     buttons=assignment_buttons(assignment_id))
         db.log_event("student_notified", actor_id=student["id"], assignment_id=assignment_id)
         sent += 1
 
@@ -402,6 +570,7 @@ def handle_update(update):
 if __name__ == "__main__":
     db.init_db()
     db.seed()
+    set_bot_commands()
     print("Bot is running (polling). Press Ctrl+C to stop.")
     offset = None
     while True:

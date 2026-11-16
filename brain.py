@@ -253,6 +253,35 @@ def classify_teacher_message(teacher_message, latest_title, latest_due_text):
     return {"ok": True, "intent": "change_deadline", "new_due_at": ti.new_due_at}
 
 
+# =====================================================================
+# PART 5 — TEACHER SUMMARY: rules compute the facts, the model writes the briefing
+# =====================================================================
+
+class Summary(BaseModel):
+    text: str = Field(min_length=10, max_length=1200)
+
+
+SUMMARY_PROMPT = """You write a short morning briefing for a school teacher, in plain English, no emojis, no headings.
+Reply with ONLY a JSON object: {"text": "<the briefing, 3 to 7 short lines separated by \\n>"}
+You will be given a list of students with their status on each assignment, flags computed by the system
+(overdue, blocked, silent, submitted, not linked) and recent events. Use ONLY these facts - never invent a student, an assignment or a reason.
+Order: 1) who needs the teacher TODAY and why (blocked, overdue, silent), 2) who is waiting for review, 3) one line on what is going well.
+If a question is included, answer it first in one line using the same facts. Name students. Be concrete and kind. Keep every string on one line."""
+
+
+def write_summary(fact_lines, question=None):
+    """fact_lines: list of plain strings produced by code (one per student-assignment + recent events)."""
+    prompt = ("Question from the teacher: " + question + "\n\n" if question else "") + "Facts:\n" + "\n".join(fact_lines)
+    try:
+        response = client().messages.create(
+            model="claude-haiku-5-5", max_tokens=1200, system=SUMMARY_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return {"ok": True, "text": Summary.model_validate_json(get_text(response)).text}
+    except Exception as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+
+
 if __name__ == "__main__":
     print("=== TEACHER MESSAGES ===")
     for msg in [

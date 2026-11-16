@@ -45,9 +45,9 @@ Counter-metric: reminders per student per week ≤ 3; zero messages during 21:00
 
 ## Plan
 
-**Week 1 (pilot hardening):** persist previews; "which assignment?" disambiguation (reply-to); "who is at risk this week?" chat query over the board data; named tunnel / hosted URL.
-**Week 4 (second class + coordinator):** coordinator read-only school view; teacher sees all her classes; webhook delivery with the idempotency table; migrations instead of resets; language-flow eval set from real messages with a zero-wrong-deadline gate.
-**Week 12 (10 schools):** Postgres + job queue; per-school quiet hours and language; voice-note transcription; reminder policy tunable per teacher; on-prem or open-weight model option behind the same `brain.py` boundary.
+**Week 1 (pilot hardening):** persist previews; "which assignment?" disambiguation (reply-to); edit instructions / cancel with the same preview-confirm; per-student timeline view (events already logged); Mini App filters (by assignment, by status); named tunnel / hosted URL.
+**Week 4 (second class + coordinator):** coordinator read-only school view; teacher sees all her classes; target one student or a group; "blocked" fairness guardrails — a reason is required, repeat-blockers surface as a pattern on the board, teacher can grant a per-student extension; holidays and leave pause reminders; webhook delivery with the idempotency table; migrations instead of resets; language-flow eval set from real messages with a zero-wrong-deadline gate.
+**Week 12 (10 schools):** Postgres + job queue; per-school quiet hours and language; voice-note assignment creation (speech-to-text in front of the same parser); reminder policy tunable per teacher; on-prem or open-weight model behind the same `brain.py` boundary; scorecards only if pilot teachers ask — grading stays a non-goal until visibility is proven.
 
 ## Risks
 
