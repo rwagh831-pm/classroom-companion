@@ -1,0 +1,15 @@
+# Implementation note (≤ 500 words)
+
+**Assumptions.** One school (Asia/Kolkata), one class with one teacher and two students is enough to prove the loop. Students may be on a parent's phone, so identity is one Telegram account per student, linked by a personal invite code. Teachers write informal Indian English ("bring it day after" = due 08:00 the day after tomorrow). A photo is a submission; no model needed to know that.
+
+**Domain and access model.** People live in `users`; what they may do lives in `memberships(user, class, role, subject)` — a person is not a role. `telegram_id` starts empty so "not linked" is a visible state. Every bot action is routed by membership and every Mini App query is filtered by the caller's class ids on the server; the Mini App's identity is Telegram's signed `initData`, verified with HMAC-SHA256 against the bot token. Forged → 401, unlinked → 403, reused invite → rejected.
+
+**State model.** Per student per assignment: `assigned → acknowledged → in_progress → submitted → completed`, with `blocked` as a side state and `overdue` derived from time (never stored). `draft` and `needs_revision` were dropped for the pilot; "needs changes" feedback moves the student back to `in_progress`. Statuses never move backwards from a submission because of a student message. A deadline change resets `acknowledged` students to `assigned` — the board must show who has not seen the new date — and clears date-based reminders so they can fire again.
+
+**Reminder policy.** Rules decide who and which kind: blocked → nudge the *teacher* (nagging a blocked child helps nobody); silent ≥ 1 h → "did you see it?"; due within 24 h; overdue → student kindly plus teacher. The model only writes the sentence, with a template fallback. Quiet hours 21:00–07:00 are enforced in code; a UNIQUE key makes the job idempotent; state is in SQLite so restarts lose nothing. Manual trigger `/remind` (and `force` for demos).
+
+**LLM boundary.** All four model calls live in `brain.py` and return Pydantic-validated JSON with a confidence score. Outcomes are CREATE / ASK / FAIL — below threshold or no deadline, the bot asks one question and never guesses. The model is given the current time, subject and class so it does not ask what the system already knows.
+
+**Failures handled.** Invalid model JSON → `model_failure` logged, user asked to rephrase. Network error in polling → retry, offset preserved. A crashing handler → logged, skipped, bot keeps serving. Duplicate Telegram update → ignored via a `processed_updates` table. Bot restart mid-preview → preview expires politely. Reminder in quiet hours → deferred and logged. Fourteen offline tests cover the rules and trust boundaries.
+
+**What I would improve next.** Persist previews; reply-to disambiguation for "which assignment"; a keyword pre-filter before the intent classifier (halves model calls); webhook delivery behind the existing idempotency table; a coordinator view; migrations instead of resets; an eval set of real messy messages with a zero-wrong-deadline gate; the "who is at risk this week?" query over the board data.
