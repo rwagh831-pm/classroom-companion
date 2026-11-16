@@ -6,7 +6,7 @@ Built as a take-home for Super Intelli Machines (Product Manager, AI/Platform). 
 
 - Bot: `@ccGreenfieldBot`
 - Mini App: served by `app.py`, exposed through a cloudflared tunnel (URL changes per run — see Runbook)
-- Demo video: _(link in submission email)_
+- Demo video (7:48): https://youtu.be/KkCTe_1Sp3w
 - Companion docs: [PRD.md](PRD.md) · [IMPLEMENTATION_NOTE.md](IMPLEMENTATION_NOTE.md)
 
 ---
