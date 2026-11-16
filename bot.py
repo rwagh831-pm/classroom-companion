@@ -388,6 +388,9 @@ def handle_callback(callback):
 
 
 def handle_update(update):
+    if not db.mark_update_processed(update["update_id"]):
+        db.log_event("duplicate_update_ignored", detail=f"update={update['update_id']}")
+        return
     if "message" in update:
         handle_message(update["message"])
     elif "callback_query" in update:

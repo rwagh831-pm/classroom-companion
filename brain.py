@@ -5,7 +5,15 @@ from typing import Optional, Literal
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
-client = anthropic.Anthropic()
+_client = None
+
+def client():
+    """Lazy: the API client is created on first model call, so importing this module (tests, db setup) needs no key."""
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic()
+    return _client
+
 SCHOOL_TZ = ZoneInfo("Asia/Kolkata")
 CONFIDENCE_THRESHOLD = 0.7
 NOT_ASSIGNMENT_THRESHOLD = 0.3
@@ -67,7 +75,7 @@ def parse_assignment(teacher_message, subject=None, class_name=None):
         f"Teacher's message:\n{teacher_message}"
     )
 
-    response = client.messages.create(
+    response = client().messages.create(
         model="claude-haiku-5-5",
         max_tokens=1500,
         system=SYSTEM_PROMPT,
@@ -132,7 +140,7 @@ Students are 13-14, write informal Indian English, may use "mam"/"sir". If unsur
 def interpret_student_message(student_message, assignment_title):
     user_prompt = f"Assignment: {assignment_title}\n\nStudent's message:\n{student_message}"
 
-    response = client.messages.create(
+    response = client().messages.create(
         model="claude-haiku-5-5",
         max_tokens=1000,
         system=STUDENT_PROMPT,
@@ -181,7 +189,7 @@ FALLBACK_REMINDER = {
 def write_reminder(kind, student_name, title, due_text):
     prompt = f"Kind: {kind}\nStudent: {student_name}\nAssignment: {title}\nDue: {due_text}"
     try:
-        response = client.messages.create(
+        response = client().messages.create(
             model="claude-haiku-5-5", max_tokens=600, system=REMINDER_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -221,7 +229,7 @@ def classify_teacher_message(teacher_message, latest_title, latest_due_text):
         f"Teacher's latest open assignment: '{latest_title}', currently due {latest_due_text}.\n\n"
         f"Teacher's message:\n{teacher_message}"
     )
-    response = client.messages.create(
+    response = client().messages.create(
         model="claude-haiku-5-5", max_tokens=1000, system=TEACHER_INTENT_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )

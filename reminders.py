@@ -67,7 +67,7 @@ def run_reminders(demo=False):
         due_text = due_at.strftime("%a %d %b, %H:%M")
 
         if kind == "blocked_teacher":
-            teacher = db.connect().execute("SELECT * FROM users WHERE id = ?", (r["created_by"],)).fetchone()
+            teacher = db.get_user(r["created_by"])
             if teacher["telegram_id"] is not None:
                 send_message(teacher["telegram_id"],
                              f"⏰ {r['display_name']} is still blocked on '{r['title']}' (due {due_text}). They may need you.")
@@ -81,7 +81,7 @@ def run_reminders(demo=False):
             send_message(r["telegram_id"], text)
             summary["sent"] += 1
             if kind == "overdue":
-                teacher = db.connect().execute("SELECT * FROM users WHERE id = ?", (r["created_by"],)).fetchone()
+                teacher = db.get_user(r["created_by"])
                 if teacher["telegram_id"] is not None:
                     send_message(teacher["telegram_id"], f"⏰ {r['display_name']} is overdue on '{r['title']}' (due {due_text}).")
 
