@@ -248,7 +248,7 @@ Cut from the brief's list, with the production version we would build:
 Product ideas from the build, designed but deferred (see PRD plan): voice-note assignment creation (speech-to-text in front of the same parser), per-student timeline (the `events` table already has it), fairness guardrails for "blocked" (reason required; repeat-blocker pattern on the board; per-student extensions), holidays/leave pausing reminders, Mini App filters, scoring/scorecards (a non-goal for the pilot — the pain is visibility, not marks).
 
 Technical limitations:
-- **Pilot simplifications**: a teacher's first class is used; a student's message applies to their latest open assignment; corrections apply to the teacher's latest assignment. A production version needs "which assignment?" disambiguation (reply-to or a picker).
+- **Pilot simplifications**: a teacher's first class is used; a student's *text* applies to their latest open assignment; corrections apply to the teacher's latest assignment. A *photo or file* with more than one open assignment asks "Which assignment is this for?" with one button per assignment (the picker pattern a production version would extend to text, e.g. via reply-to).
 - **Preview state is in memory** (`pending` dict). A bot restart between preview and Confirm expires the preview. Production: persist drafts in SQLite.
 - **Quick tunnel URL changes** every restart; `MINI_APP_URL` must be updated and the bot restarted.
 - **Polling, single process.** Fine for one school; at 100 schools: webhook + a queue + Postgres, with the idempotency table doing the retry safety.

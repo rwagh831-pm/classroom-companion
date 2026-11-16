@@ -149,7 +149,8 @@ def add_submission(assignment_id, student_id, kind, content):
 
 
 # ============ SHORT-LIVED STATE ============
-pending = {}
+pending = {}                 # teacher previews waiting for Confirm
+pending_submissions = {}     # a student's photo/file waiting for "which assignment?"
 
 
 # ============ MESSAGE FORMATS ============
@@ -353,6 +354,15 @@ def handle_teacher(message, user, classes):
         send_message(chat_id, "Sorry, I couldn't understand that. Please try rephrasing.")
 
 
+def record_submission(chat_id, user, a, kind, content):
+    """The one place a submission is written, whether it came directly or via the 'which assignment?' picker."""
+    add_submission(a["id"], user["id"], kind, content)
+    set_student_status(a["id"], user["id"], "submitted")
+    db.log_event("submission_received", actor_id=user["id"], assignment_id=a["id"], detail=kind)
+    send_message(chat_id, f"✅ Submitted ({kind}) for: {a['title']}. Your teacher will review it.")
+    notify_teacher(a["id"], f"📥 {user['display_name']} submitted a {kind} for '{a['title']}'.")
+
+
 def handle_student(message, user):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
@@ -370,11 +380,13 @@ def handle_student(message, user):
             kind, content = "photo", message["photo"][-1]["file_id"]       # last = largest size
         else:
             kind, content = "file", message["document"]["file_id"]
-        add_submission(assignment_id, user["id"], kind, content)
-        set_student_status(assignment_id, user["id"], "submitted")
-        db.log_event("submission_received", actor_id=user["id"], assignment_id=assignment_id, detail=kind)
-        send_message(chat_id, f"✅ Submitted ({kind}) for: {a['title']}. Your teacher will review it.")
-        notify_teacher(assignment_id, f"📥 {user['display_name']} submitted a {kind} for '{a['title']}'.")
+        if len(open_items) > 1:                             # ambiguous: ask, don't guess
+            key = uuid.uuid4().hex[:8]
+            pending_submissions[key] = {"student_id": user["id"], "kind": kind, "content": content}
+            buttons = [[{"text": f"📎 {o['title'][:40]}", "callback_data": f"sub:{key}:{o['id']}"}] for o in open_items]
+            send_message(chat_id, "Which assignment is this for?", buttons=buttons)
+            return
+        record_submission(chat_id, user, a, kind, content)
         return
 
     if not text:
@@ -432,6 +444,7 @@ def handle_message(message):
             send_message(chat_id, format_assignment_for_student(a), buttons=assignment_buttons(a["id"]))
         return
 
+    from_button = text in BUTTON_TO_COMMAND
     text = BUTTON_TO_COMMAND.get(text, text)        # persistent buttons arrive as plain text
 
     if text == "/help":
@@ -453,9 +466,11 @@ def handle_message(message):
             send_message(chat_id, "Only teachers can run reminders.")
             return
         summary = reminders.run_reminders(demo=("force" in text))
-        send_message(chat_id, f"Reminder job ran.\nSent to students: {summary['sent']}\nTeacher nudges: {summary['teacher_nudges']}\n"
-                              f"Deferred (quiet hours): {summary['deferred_quiet_hours']}\nSkipped: {summary['skipped']}\n\n"
-                              f"(Use /remind force to ignore quiet hours and silence thresholds for testing.)")
+        reply = (f"Reminder job ran.\nSent to students: {summary['sent']}\nTeacher nudges: {summary['teacher_nudges']}\n"
+                 f"Deferred (quiet hours): {summary['deferred_quiet_hours']}\nAlready reminded / nothing due: {summary['skipped']}")
+        if not from_button:
+            reply += "\n\n(Testing tip: /remind force ignores quiet hours and the 1-hour silence threshold.)"
+        send_message(chat_id, reply)
         return
 
     if text == "/start":
@@ -480,6 +495,23 @@ def handle_callback(callback):
     message_id = callback["message"]["message_id"]
     action, _, draft_id = callback.get("data", "").partition(":")
     if not draft_id:                                      # malformed / foreign button data: ignore safely
+        return
+
+    # ---- Student picked which assignment a photo/file belongs to ----
+    if action == "sub":
+        key, _, aid = draft_id.partition(":")
+        user = find_user(callback["from"]["id"])
+        item = pending_submissions.get(key)
+        if user is None or item is None or item["student_id"] != user["id"] or not aid.isdigit():
+            edit_message(chat_id, message_id, "That upload has expired. Please send the photo again.")
+            return
+        target = next((o for o in student_assignments(user["id"], open_only=True) if o["id"] == int(aid)), None)
+        if target is None:
+            send_message(chat_id, "That assignment is not open for you.")
+            return
+        pending_submissions.pop(key)
+        edit_message(chat_id, message_id, f"📎 Attached to: {target['title']}")
+        record_submission(chat_id, user, target, item["kind"], item["content"])
         return
 
     # ---- Student one-tap buttons on an assignment message ----
@@ -529,7 +561,8 @@ def handle_callback(callback):
             if student["telegram_id"] is None:
                 continue
             send_message(student["telegram_id"],
-                         f"📝 Deadline changed — {a['title']}\n\nNew due: {new_due:%a %d %b, %H:%M} (was {old_due:%a %d %b, %H:%M})\n\nReply 'ok' so your teacher knows you saw the new date.")
+                         f"📝 Deadline changed — {a['title']}\n\nNew due: {new_due:%a %d %b, %H:%M} (was {old_due:%a %d %b, %H:%M})\n\nTap ✅ Got it so your teacher knows you saw the new date.",
+                         buttons=assignment_buttons(a["id"]))
             sent += 1
         edit_message(chat_id, message_id, f"✅ Deadline changed: {a['title']}\nNow due {new_due:%a %d %b, %H:%M}. Told {sent} student(s).")
         return
